@@ -8,6 +8,7 @@ public class AppEntry {
     public int mode = Bridge.MODE_FOLLOW;
     public boolean system;
     public boolean doze;
+    public boolean launcher;
 
     public AppEntry(String pkg, String label, boolean system) {
         this.pkg = pkg;

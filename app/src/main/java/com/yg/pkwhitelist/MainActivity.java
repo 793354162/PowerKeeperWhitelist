@@ -158,6 +158,7 @@ public class MainActivity extends AppCompatActivity {
                     e.doze = b.getBoolean(Bridge.KEY_DOZE, false);
                     e.bg = b.getString(Bridge.KEY_BG, "");
                     e.mode = b.getInt(Bridge.KEY_MODE, Bridge.MODE_FOLLOW);
+                    e.launcher = b.getBoolean(Bridge.KEY_LAUNCHER, false);
                     String label = b.getString(Bridge.KEY_LABEL);
                     if (label != null) e.label = label;
                 }
@@ -179,10 +180,14 @@ public class MainActivity extends AppCompatActivity {
         else next = Bridge.MODE_FOLLOW;
         e.mode = next;
         if (next == Bridge.MODE_ALLOW) e.doze = true;
-        if (next == Bridge.MODE_DENY) e.doze = false;
+        if (next == Bridge.MODE_DENY && !e.launcher) e.doze = false;
         adapter.refresh();
         sendSet(e.pkg, next);
-        Toast.makeText(this, e.label + " → " + e.modeText(), Toast.LENGTH_SHORT).show();
+        if (next == Bridge.MODE_DENY && e.launcher) {
+            Toast.makeText(this, e.label + "：桌面只做智能限制，不动 doze 白名单", Toast.LENGTH_LONG).show();
+        } else {
+            Toast.makeText(this, e.label + " → " + e.modeText(), Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void sendSet(String pkg, int mode) {

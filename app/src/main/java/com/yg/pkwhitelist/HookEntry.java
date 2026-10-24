@@ -455,8 +455,12 @@ public class HookEntry extends XposedModule {
                 // 表里没有这行，才退回代价高的单查
                 bg = PowerKeeperApi.readBgControl(ctx, pkg);
             }
+            int mode = modeOf(pkg);
+            // 强制禁止时不让被系统回写的脏值影响显示
+            if (mode == Bridge.MODE_DENY) bg = "miuiAuto";
             b.putString(Bridge.KEY_BG, bg == null ? "" : bg);
-            b.putInt(Bridge.KEY_MODE, modeOf(pkg));
+            b.putInt(Bridge.KEY_MODE, mode);
+            b.putBoolean(Bridge.KEY_LAUNCHER, isLauncher(pkg));
             return b;
         } catch (Throwable t) {
             return null;
@@ -475,15 +479,21 @@ public class HookEntry extends XposedModule {
                     lastEnforce.put(pkg, System.currentTimeMillis());
                     boolean wasDoze = idle != null && idle.isWhitelisted(pkg, 0);
                     String wasBg = PowerKeeperApi.readBgControl(ctx, pkg);
+                    boolean launcher = isLauncher(pkg);
                     // 智能限制 + 清零一切白名单豁免：补行 -> 移出 doze -> 写 miui_auto
                     String row = PowerKeeperApi.ensureRow(ctx, pkg);
                     if (store != null && captureOrig) {
                         store.saveOrigIfAbsent(pkg, wasDoze, wasBg, PowerKeeperApi.wasInserted(row));
                     }
-                    boolean rm = idle != null && idle.removeForce(pkg);
+                    // 桌面不能踢出 doze：被 Doze 杀掉会重载桌面，还会弹一次系统设置页
+                    boolean rm = !launcher && idle != null && idle.removeForce(pkg);
                     boolean w = PowerKeeperApi.writeBgControl(ctx, pkg, "miui_auto");
-                    purgeAlwaysWhite();
-                    diag = "enforce " + pkg + " row[" + row + "] rm=" + rm + " write=" + w
+                    if (!launcher) purgeAlwaysWhite();
+                    // 核心系统应用（紧急警报/急救信息）在系统白名单里，删不掉也压不住，
+                    // PowerKeeper 会异步把配置回写，这里补两次
+                    if (!launcher) scheduleRewrite(pkg);
+                    diag = "enforce " + pkg + (launcher ? " [launcher]" : "")
+                            + " row[" + row + "] rm=" + rm + " write=" + w
                             + " orig=" + (wasDoze ? "D1" : "D0") + "/" + wasBg;
                     logi(diag);
                     break;
@@ -495,6 +505,48 @@ public class HookEntry extends XposedModule {
         } catch (Throwable t) {
             logi("apply failed " + t);
         }
+    }
+
+    private final Map<String, Boolean> launcherCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 桌面（CATEGORY_HOME）单独处理：踢出 doze 白名单会导致桌面重载 + 弹一次系统页 */
+    private boolean isLauncher(String pkg) {
+        Boolean c = launcherCache.get(pkg);
+        if (c != null) return c;
+        boolean r = false;
+        try {
+            Intent i = new Intent(Intent.ACTION_MAIN);
+            i.addCategory(Intent.CATEGORY_HOME);
+            List<android.content.pm.ResolveInfo> list = ctx.getPackageManager().queryIntentActivities(i, 0);
+            if (list != null) {
+                for (android.content.pm.ResolveInfo ri : list) {
+                    if (ri.activityInfo != null && pkg.equals(ri.activityInfo.packageName)) {
+                        r = true;
+                        break;
+                    }
+                }
+            }
+        } catch (Throwable ignore) {
+        }
+        launcherCache.put(pkg, r);
+        return r;
+    }
+
+    /** 核心系统应用的配置会被 PowerKeeper 异步回写，隔一会儿补两刀 */
+    private void scheduleRewrite(String pkg) {
+        Thread t = new Thread(() -> {
+            for (int delay : new int[]{300, 1200}) {
+                try {
+                    Thread.sleep(delay);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                if (store == null || store.get(pkg) != Bridge.MODE_DENY) return;
+                PowerKeeperApi.writeBgControl(ctx, pkg, "miui_auto");
+            }
+        }, "pk-rewrite");
+        t.setDaemon(true);
+        t.start();
     }
 
     /**

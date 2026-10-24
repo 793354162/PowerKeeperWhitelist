@@ -125,7 +125,9 @@ public class AppListAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
         h.title.setText(e.label);
         h.sub.setText(e.pkg);
 
-        if (e.doze) {
+        if (e.launcher) {
+            chip(h.doze, "桌面", R.color.chip_gray_fg, R.color.chip_gray_bg);
+        } else if (e.doze) {
             chip(h.doze, "Doze 白名单", R.color.chip_green_fg, R.color.chip_green_bg);
         } else {
             chip(h.doze, "非白名单", R.color.chip_red_fg, R.color.chip_red_bg);

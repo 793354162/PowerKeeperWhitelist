@@ -33,6 +33,7 @@ public final class Bridge {
     public static final String KEY_DOZE = "doze";
     public static final String KEY_BG = "bg";
     public static final String KEY_MODE = "mode";
+    public static final String KEY_LAUNCHER = "launcher";
     public static final String KEY_DIAG = "diag";
     public static final String KEY_REPORT = "report";
 
