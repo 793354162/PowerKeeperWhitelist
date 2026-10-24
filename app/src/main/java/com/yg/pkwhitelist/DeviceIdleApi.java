@@ -59,6 +59,21 @@ public class DeviceIdleApi {
         invoke("removePowerSaveWhitelistApp", new Class[]{String.class}, new Object[]{pkg});
     }
 
+    /**
+     * 强制移出 doze 白名单：单包 API 不存在时退回数组 API，最后用查询结果校验。
+     * 返回 true 表示已确认不在白名单里。
+     */
+    public boolean removeForce(String pkg) {
+        if (controller == null) return false;
+        if (!isWhitelisted(pkg, 0)) return true;
+        invoke("removePowerSaveWhitelistApp", new Class[]{String.class}, new Object[]{pkg});
+        if (!isWhitelisted(pkg, 0)) return true;
+        invoke("removePowerSaveWhitelistApps", new Class[]{String[].class}, new Object[]{new String[]{pkg}});
+        if (!isWhitelisted(pkg, 0)) return true;
+        invoke("removePowerSaveWhitelistApp", new Class[]{String.class, int.class}, new Object[]{pkg, 0});
+        return !isWhitelisted(pkg, 0);
+    }
+
     private Object invoke(String name, Class<?>[] types, Object[] args) {
         try {
             Method m = controller.getClass().getMethod(name, types);

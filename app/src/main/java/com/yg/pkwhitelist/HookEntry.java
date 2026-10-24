@@ -79,7 +79,10 @@ public class HookEntry extends XposedModule {
                     Class.forName("android.os.IDeviceIdleController"), String[].class);
             hook(add).setId("pk-add").intercept(chain -> {
                 Object[] args = chain.getArgs().toArray();
-                args[1] = filterForAdd((String[]) args[1]);
+                String[] filtered = filterForAdd((String[]) args[1]);
+                // 全部被拒（例如只有 DENY 包）时连 IPC 都不发，避免系统侧再记一次
+                if (filtered.length == 0) return null;
+                args[1] = filtered;
                 return chain.proceed(args);
             });
             try {
@@ -127,8 +130,16 @@ public class HookEntry extends XposedModule {
                     if (in != null && out != null) {
                         String pkg = in.getString("App");
                         int mode = modeOf(pkg);
+                        // 先取系统算出来的原值，再决定要不要覆盖
+                        String original = out.getString("AppConfigure");
                         if (mode != Bridge.MODE_FOLLOW) {
                             out.putString("AppConfigure", PowerKeeperApi.interfaceValue(mode));
+                        }
+                        if (mode == Bridge.MODE_DENY && pkg != null) {
+                            // 原值为空（没这行 / -1）或被自动回写成 no_restrict 时，重新压一次
+                            if (original == null || "no_restrict".equals(original)) {
+                                scheduleReEnforce(pkg);
+                            }
                         }
                     }
                 } catch (Throwable ignore) {
@@ -138,6 +149,27 @@ public class HookEntry extends XposedModule {
         } catch (Throwable t) {
             fail("hookGetConfigure", t);
         }
+    }
+
+    private final java.util.Map<String, Long> lastEnforce = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 限频自愈：同一包 30 秒内只重新强制一次，避免读写回环 */
+    private void scheduleReEnforce(String pkg) {
+        Long prev = lastEnforce.get(pkg);
+        long now = System.currentTimeMillis();
+        if (prev != null && now - prev < 30_000L) return;
+        lastEnforce.put(pkg, now);
+        Thread t = new Thread(() -> {
+            try {
+                String r = PowerKeeperApi.enforce(ctx, pkg, idle);
+                purgeAlwaysWhite();
+                diag = "re-enforce " + pkg + " " + r;
+                logi(diag);
+            } catch (Throwable ignore) {
+            }
+        }, "pk-heal");
+        t.setDaemon(true);
+        t.start();
     }
 
     private void hookSetConfigure(ClassLoader cl) {
@@ -222,6 +254,7 @@ public class HookEntry extends XposedModule {
                         register(c);
                         diag = "hook=ok idle=" + idle.available() + " api=" + getApiVersion();
                         logi("bridge ready, idle=" + idle.available());
+                        purgeLater();
                         return;
                     } catch (Throwable e) {
                         fail("bridge", e);
@@ -237,6 +270,20 @@ public class HookEntry extends XposedModule {
             diag = "hook=ok ctx=null";
             logi("context not ready");
         }, "pk-bridge");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** DeviceIdleController 构造时才会填充 sAlwaysWhiteApps，等它跑完再踢 */
+    private void purgeLater() {
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(4000);
+            } catch (InterruptedException ignore) {
+                return;
+            }
+            purgeAlwaysWhite();
+        }, "pk-purge");
         t.setDaemon(true);
         t.start();
     }
@@ -363,16 +410,59 @@ public class HookEntry extends XposedModule {
                     if (idle != null) idle.add(pkg);
                     PowerKeeperApi.writeBgControl(ctx, pkg, "no_restrict");
                     break;
-                case Bridge.MODE_DENY:
-                    if (idle != null) idle.remove(pkg);
-                    PowerKeeperApi.writeBgControl(ctx, pkg, "restrict_bg");
+                case Bridge.MODE_DENY: {
+                    // 智能限制 + 清零一切白名单豁免：补行 -> 移出 doze -> 写 miui_auto
+                    String r = PowerKeeperApi.enforce(ctx, pkg, idle);
+                    purgeAlwaysWhite();
+                    diag = "enforce " + pkg + " " + r;
+                    logi(diag);
                     break;
+                }
                 default:
                     PowerKeeperApi.writeBgControl(ctx, pkg, "miui_auto");
                     break;
             }
         } catch (Throwable t) {
             logi("apply failed " + t);
+        }
+    }
+
+    /**
+     * 微信/QQ 这类包还在 arrays.xml 的 doze_always_white_apps 里，
+     * 走 DeviceIdleController.sAlwaysWhiteApps（不进系统白名单，而是 Doze 临时豁免），
+     * 改 local.config 删不掉。这里直接把标记为 DENY 的包从两个常驻集合里踢出去；
+     * 集合只在 sAlwaysWhiteAppsInited 之前填充一次，所以踢一次就够。
+     */
+    private void purgeAlwaysWhite() {
+        Context c = ctx;
+        if (c == null || store == null) return;
+        try {
+            Class<?> dc = Class.forName("com.miui.powerkeeper.controller.DeviceIdleController",
+                    false, c.getClassLoader());
+            purgeSet(dc, "sAlwaysWhiteApps");
+            purgeSet(dc, "sPowerSaveModeAlwaysWhiteApps");
+        } catch (Throwable t) {
+            logi("purgeAlwaysWhite " + t);
+        }
+    }
+
+    private void purgeSet(Class<?> owner, String field) {
+        try {
+            java.lang.reflect.Field f = owner.getDeclaredField(field);
+            f.setAccessible(true);
+            Object v = f.get(null);
+            if (!(v instanceof java.util.Set)) return;
+            java.util.Set<?> set = (java.util.Set<?>) v;
+            List<String> drop = new ArrayList<>();
+            for (Object o : set) {
+                if (o instanceof String && modeOf((String) o) == Bridge.MODE_DENY) {
+                    drop.add((String) o);
+                }
+            }
+            if (!drop.isEmpty() && set.removeAll(drop)) {
+                logi("purged " + field + " " + drop);
+            }
+        } catch (Throwable ignore) {
         }
     }
 }
