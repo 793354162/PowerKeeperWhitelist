@@ -309,6 +309,8 @@ public class HookEntry extends XposedModule {
             @Override
             public void onReceive(Context context, Intent intent) {
                 try {
+                    publishStatus(context, "rx " + intent.getAction()
+                            + " from=" + sentFrom(this));
                     if (!trusted(this)) {
                         logi("reject untrusted sender");
                         return;
@@ -316,6 +318,7 @@ public class HookEntry extends XposedModule {
                     handle(this, intent);
                 } catch (Throwable t) {
                     logi("bridge error " + t);
+                    publishStatus(context, "rxErr " + t);
                 }
             }
         };
@@ -333,12 +336,70 @@ public class HookEntry extends XposedModule {
         logi(diag);
     }
 
+    /** 一次性把 userTable 全部读进内存，避免逐个应用查库（190 次查询会慢到超时） */
+    private volatile Map<String, String> bgMap;
+
+    private void refreshBgMap() {
+        Map<String, String> m = new java.util.HashMap<>();
+        try {
+            Class<?> helper = Class.forName("com.miui.powerkeeper.provider.UserConfigureHelper",
+                    false, ctx.getClassLoader());
+            Method create = helper.getDeclaredMethod("createFromTable", Context.class);
+            create.setAccessible(true);
+            Object list = create.invoke(null, ctx);
+            Method gp = helper.getDeclaredMethod("getPackageName");
+            Method gb = helper.getDeclaredMethod("getBgControl");
+            gp.setAccessible(true);
+            gb.setAccessible(true);
+            if (list instanceof List) {
+                for (Object h : (List<?>) list) {
+                    Object p = gp.invoke(h);
+                    if (!(p instanceof String)) continue;
+                    Object b = gb.invoke(h);
+                    if (b instanceof String) m.put((String) p, (String) b);
+                }
+            }
+        } catch (Throwable t) {
+            logi("refreshBgMap " + t);
+        }
+        bgMap = m;
+        logi("bgMap size=" + m.size());
+    }
+
     /** 把 hook 存活状态写到 Settings.Global，UI 收不到广播时也能判断是 hook 没加载还是通道断了 */
     private void publishStatus(Context c, String s) {
         try {
             android.provider.Settings.Global.putString(c.getContentResolver(),
-                    "pkwl_hook", s + " @" + System.currentTimeMillis());
+                    Bridge.GK_STATUS, s + " @" + System.currentTimeMillis());
         } catch (Throwable ignore) {
+        }
+    }
+
+    /**
+     * 兜底回传：ordered broadcast 的 resultExtras 在某些 ROM 上会丢，
+     * 这里把同一份结果写进 Settings.Global，UI 轮询取。
+     */
+    private void publishResult(int seq, ArrayList<Bundle> rows) {
+        if (seq < 0 || ctx == null) return;
+        try {
+            org.json.JSONArray arr = new org.json.JSONArray();
+            for (Bundle b : rows) {
+                org.json.JSONObject o = new org.json.JSONObject();
+                o.put("p", b.getString(Bridge.KEY_PKG));
+                o.put("l", b.getString(Bridge.KEY_LABEL));
+                o.put("u", b.getInt(Bridge.KEY_UID));
+                o.put("s", b.getBoolean(Bridge.KEY_SYSTEM) ? 1 : 0);
+                o.put("d", b.getBoolean(Bridge.KEY_DOZE) ? 1 : 0);
+                o.put("b", b.getString(Bridge.KEY_BG, ""));
+                o.put("m", b.getInt(Bridge.KEY_MODE));
+                arr.put(o);
+            }
+            String payload = seq + "|" + android.util.Base64.encodeToString(
+                    arr.toString().getBytes("UTF-8"), android.util.Base64.NO_WRAP);
+            android.provider.Settings.Global.putString(ctx.getContentResolver(),
+                    Bridge.GK_RESULT, payload);
+        } catch (Throwable t) {
+            logi("publishResult " + t);
         }
     }
 
@@ -354,19 +415,15 @@ public class HookEntry extends XposedModule {
     }
 
     /**
-     * 发送方校验：包名必须是模块，或者与模块同签名。
-     * getSentFromPackage 拿不到（老系统 / 系统内部广播）时放行。
+     * 发送方校验。
+     * 目前只记录不拦截：先确认这台机器上 getSentFromPackage() 到底返回什么，
+     * 否则会像上一版那样「静默全拒」而完全无法排查。
      */
     private boolean trusted(BroadcastReceiver r) {
         String from = sentFrom(r);
-        if (from == null) return true;
-        if (Bridge.MODULE_PKG.equals(from)) return true;
-        try {
-            return ctx.getPackageManager().checkSignatures(Bridge.MODULE_PKG, from)
-                    == PackageManager.SIGNATURE_MATCH;
-        } catch (Throwable t) {
-            return false;
-        }
+        if (from == null || Bridge.MODULE_PKG.equals(from)) return true;
+        diag = diag + " | warnFrom=" + from;
+        return true;
     }
 
     private void handle(BroadcastReceiver r, Intent intent) {
@@ -377,6 +434,7 @@ public class HookEntry extends XposedModule {
             ArrayList<Bundle> out = new ArrayList<>();
             // 省电模式切换时会把 sPowerSaveModeAlwaysWhiteApps 并回常驻集合，顺手再踢一次
             purgeAlwaysWhite();
+            refreshBgMap();
             if (pkgs != null) {
                 for (String pkg : pkgs) {
                     Bundle b = statusOf(pkg);
@@ -390,6 +448,7 @@ public class HookEntry extends XposedModule {
             if (!DeviceIdleApi.lastError.isEmpty()) d += " | idle:" + DeviceIdleApi.lastError;
             res.putString(Bridge.KEY_DIAG, d);
             publishStatus(ctx, "q=" + (pkgs == null ? 0 : pkgs.size()) + " " + d);
+            publishResult(intent.getIntExtra(Bridge.EXTRA_SEQ, -1), out);
             resultExtras(r, res);
         } else if (Bridge.ACTION_SET.equals(action)) {
             String pkg = intent.getStringExtra(Bridge.EXTRA_PKG);
@@ -454,7 +513,11 @@ public class HookEntry extends XposedModule {
             b.putInt(Bridge.KEY_UID, ai.uid);
             b.putBoolean(Bridge.KEY_SYSTEM, (ai.flags & ApplicationInfo.FLAG_SYSTEM) != 0);
             b.putBoolean(Bridge.KEY_DOZE, idle != null && idle.isWhitelisted(pkg, 0));
-            String bg = PowerKeeperApi.readBgControl(ctx, pkg);
+            String bg = bgMap != null ? bgMap.get(pkg) : null;
+            if (bg == null) {
+                // 表里没有这行，才退回代价高的单查
+                bg = PowerKeeperApi.readBgControl(ctx, pkg);
+            }
             b.putString(Bridge.KEY_BG, bg == null ? "" : bg);
             b.putInt(Bridge.KEY_MODE, modeOf(pkg));
             return b;

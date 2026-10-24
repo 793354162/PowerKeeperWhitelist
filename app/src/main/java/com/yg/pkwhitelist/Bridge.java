@@ -22,6 +22,11 @@ public final class Bridge {
     public static final String EXTRA_PKG = "pkg";
     public static final String EXTRA_MODE = "mode";
     public static final String EXTRA_RESULT = "result";
+    public static final String EXTRA_SEQ = "seq";
+
+    /** Settings.Global 里的键：hook 存活状态 / 查询结果兜底通道 */
+    public static final String GK_STATUS = "pkwl_hook";
+    public static final String GK_RESULT = "pkwl_res";
 
     public static final String KEY_PKG = "pkg";
     public static final String KEY_LABEL = "label";

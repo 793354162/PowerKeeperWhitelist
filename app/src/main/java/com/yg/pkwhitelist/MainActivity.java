@@ -107,14 +107,14 @@ public class MainActivity extends AppCompatActivity {
 
     private void queryAll() {
         List<AppEntry> list = adapter.items();
+        if (list.isEmpty()) return;
         gotResponse = false;
-        tvStatus.setText("查询中…");
-        for (int i = 0; i < list.size(); i += 30) {
-            List<AppEntry> batch = list.subList(i, Math.min(i + 30, list.size()));
-            ArrayList<String> pkgs = new ArrayList<>();
-            for (AppEntry e : batch) pkgs.add(e.pkg);
-            queryBatch(pkgs);
-        }
+        tvStatus.setText("查询中… (" + list.size() + ")");
+        ArrayList<String> pkgs = new ArrayList<>();
+        for (AppEntry e : list) pkgs.add(e.pkg);
+        int seq = seqGen.incrementAndGet();
+        queryBatch(pkgs, seq);
+        pollResult(seq, 0);
         ui.postDelayed(() -> {
             if (!gotResponse) {
                 String st = readHookStatus();
@@ -122,25 +122,79 @@ public class MainActivity extends AppCompatActivity {
                     tvStatus.setText("hook 没加载：LSPosed 里启用模块、作用域勾 com.miui.powerkeeper，再重启手机");
                     tvDiag.setText("diag: no response / pkwl_hook=null");
                 } else {
-                    tvStatus.setText("hook 已加载，但广播没通（下面是它的自报状态）");
+                    String rx = st.contains("rx ") ? "广播已到达，回传失败" : "广播没到 onReceive";
+                    tvStatus.setText("hook 已加载，但" + rx);
                     tvDiag.setText("diag: no response / pkwl_hook=" + st);
                 }
             }
-        }, 4000);
+        }, 10000);
     }
 
-    /** hook 侧会把存活状态写进 Settings.Global，用来区分「没加载」和「广播断了」 */
-    private String readHookStatus() {
+    private final java.util.concurrent.atomic.AtomicInteger seqGen =
+            new java.util.concurrent.atomic.AtomicInteger(1);
+
+    /** 兜底：从 Settings.Global 轮询同一份结果，不依赖 ordered broadcast 的 resultExtras */
+    private void pollResult(int seq, int attempt) {
+        ui.postDelayed(() -> {
+            String payload = readGlobal(Bridge.GK_RESULT);
+            if (payload != null) {
+                int bar = payload.indexOf('|');
+                if (bar > 0) {
+                    try {
+                        if (Integer.parseInt(payload.substring(0, bar).trim()) == seq) {
+                            String json = new String(android.util.Base64.decode(
+                                    payload.substring(bar + 1), android.util.Base64.NO_WRAP), "UTF-8");
+                            applyJson(json);
+                            return;
+                        }
+                    } catch (Throwable ignore) {
+                    }
+                }
+            }
+            if (!gotResponse && attempt < 20) pollResult(seq, attempt + 1);
+        }, 400);
+    }
+
+    private void applyJson(String json) {
         try {
-            return android.provider.Settings.Global.getString(getContentResolver(), "pkwl_hook");
+            org.json.JSONArray arr = new org.json.JSONArray(json);
+            int n = 0;
+            for (int k = 0; k < arr.length(); k++) {
+                org.json.JSONObject o = arr.getJSONObject(k);
+                AppEntry e = adapter.find(o.optString("p"));
+                if (e == null) continue;
+                e.doze = o.optInt("d") == 1;
+                e.bg = o.optString("b", "");
+                e.mode = o.optInt("m");
+                String l = o.optString("l", null);
+                if (l != null) e.label = l;
+                n++;
+            }
+            gotResponse = true;
+            adapter.refresh();
+            tvStatus.setText("已同步 " + n + " 个应用");
+        } catch (Throwable t) {
+            tvStatus.setText("解析失败: " + t);
+        }
+    }
+
+    private String readGlobal(String key) {
+        try {
+            return android.provider.Settings.Global.getString(getContentResolver(), key);
         } catch (Throwable t) {
             return null;
         }
     }
 
-    private void queryBatch(ArrayList<String> pkgs) {
+    /** hook 侧会把存活状态写进 Settings.Global，用来区分「没加载」和「广播断了」 */
+    private String readHookStatus() {
+        return readGlobal(Bridge.GK_STATUS);
+    }
+
+    private void queryBatch(ArrayList<String> pkgs, int seq) {
         Intent i = new Intent(Bridge.ACTION_QUERY).setPackage(Bridge.PKG);
         i.putStringArrayListExtra(Bridge.EXTRA_PKGS, pkgs);
+        i.putExtra(Bridge.EXTRA_SEQ, seq);
         BroadcastReceiver rr = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
