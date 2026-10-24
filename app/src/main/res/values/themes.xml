@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.PKWhitelist" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">#3DDC84</item>
+        <item name="colorPrimaryVariant">#2BB673</item>
+        <item name="colorOnPrimary">#000000</item>
+    </style>
+</resources>
