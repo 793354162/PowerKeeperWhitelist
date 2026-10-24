@@ -19,11 +19,22 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK platform 34
-        run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
+      - name: Prepare Android SDK
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "SDK=$SDK"
+          export ANDROID_HOME="$SDK"
+          export ANDROID_SDK_ROOT="$SDK"
+          SDKM="$(find "$SDK" -name sdkmanager -type f 2>/dev/null | head -n1)"
+          echo "sdkmanager=$SDKM"
+          if [ -n "$SDKM" ]; then
+            yes | "$SDKM" --licenses >/dev/null 2>&1 || true
+            "$SDKM" --install "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1 || true
+          fi
+          ls "$SDK/platforms" || true
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
