@@ -7,10 +7,11 @@ import java.lang.reflect.Method;
 
 /**
  * 反射调用系统 IDeviceIdleController（隐藏 API）。
- * 只在 hook 侧（PowerKeeper 进程，android.uid.system）使用，普通 app 进程没有权限。
+ * 只在 hook 侧（PowerKeeper 进程，android.uid.system）使用。
  */
 public class DeviceIdleApi {
     private static final String TAG = "PKWL";
+    public static volatile String lastError = "";
     private Object controller;
 
     public DeviceIdleApi() {
@@ -19,13 +20,14 @@ public class DeviceIdleApi {
             Method getService = sm.getDeclaredMethod("getService", String.class);
             IBinder binder = (IBinder) getService.invoke(null, "deviceidle");
             if (binder == null) {
-                Log.w(TAG, "deviceidle service not found");
+                lastError = "service=null";
                 return;
             }
             Class<?> stub = Class.forName("android.os.IDeviceIdleController$Stub");
             Method asInterface = stub.getDeclaredMethod("asInterface", IBinder.class);
             controller = asInterface.invoke(null, binder);
         } catch (Throwable t) {
+            lastError = "init:" + t.getClass().getSimpleName();
             Log.w(TAG, "init DeviceIdleApi failed", t);
         }
     }
@@ -36,12 +38,15 @@ public class DeviceIdleApi {
 
     public boolean isWhitelisted(String pkg, int userId) {
         if (controller == null) return false;
-        // Android 13+ 可能带 userId 参数，旧版只有包名
         Object r = invoke("isPowerSaveWhitelistApp", new Class[]{String.class, int.class}, new Object[]{pkg, userId});
         if (r == null) {
             r = invoke("isPowerSaveWhitelistApp", new Class[]{String.class}, new Object[]{pkg});
         }
-        return r instanceof Boolean && (Boolean) r;
+        if (r == null) {
+            lastError = "isWhitelisted=null";
+            return false;
+        }
+        return (Boolean) r;
     }
 
     public void add(String pkg) {
@@ -60,6 +65,7 @@ public class DeviceIdleApi {
             m.setAccessible(true);
             return m.invoke(controller, args);
         } catch (Throwable t) {
+            lastError = name + ":" + t.getClass().getSimpleName();
             return null;
         }
     }

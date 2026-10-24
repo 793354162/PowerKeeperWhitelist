@@ -267,7 +267,10 @@ public class HookEntry extends XposedModule {
             }
             Bundle res = new Bundle();
             res.putParcelableArrayList(Bridge.EXTRA_RESULT, out);
-            res.putString(Bridge.KEY_DIAG, diag + (lastError.isEmpty() ? "" : " | " + lastError));
+            String d = diag;
+            if (!PowerKeeperApi.lastError.isEmpty()) d += " | bg:" + PowerKeeperApi.lastError;
+            if (!DeviceIdleApi.lastError.isEmpty()) d += " | idle:" + DeviceIdleApi.lastError;
+            res.putString(Bridge.KEY_DIAG, d);
             resultExtras(r, res);
         } else if (Bridge.ACTION_SET.equals(action)) {
             String pkg = intent.getStringExtra(Bridge.EXTRA_PKG);
