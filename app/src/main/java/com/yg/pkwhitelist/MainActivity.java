@@ -107,75 +107,23 @@ public class MainActivity extends AppCompatActivity {
 
     private void queryAll() {
         List<AppEntry> list = adapter.items();
-        if (list.isEmpty()) return;
         gotResponse = false;
-        tvStatus.setText("查询中… (" + list.size() + ")");
-        ArrayList<String> pkgs = new ArrayList<>();
-        for (AppEntry e : list) pkgs.add(e.pkg);
-        int seq = seqGen.incrementAndGet();
-        queryBatch(pkgs, seq);
-        pollResult(seq, 0);
+        tvStatus.setText("查询中…");
+        for (int i = 0; i < list.size(); i += 30) {
+            List<AppEntry> batch = list.subList(i, Math.min(i + 30, list.size()));
+            ArrayList<String> pkgs = new ArrayList<>();
+            for (AppEntry e : batch) pkgs.add(e.pkg);
+            queryBatch(pkgs);
+        }
         ui.postDelayed(() -> {
             if (!gotResponse) {
                 String st = readHookStatus();
-                if (st == null) {
-                    tvStatus.setText("hook 没加载：LSPosed 里启用模块、作用域勾 com.miui.powerkeeper，再重启手机");
-                    tvDiag.setText("diag: no response / pkwl_hook=null");
-                } else {
-                    String rx = st.contains("rx ") ? "广播已到达，回传失败" : "广播没到 onReceive";
-                    tvStatus.setText("hook 已加载，但" + rx);
-                    tvDiag.setText("diag: no response / pkwl_hook=" + st);
-                }
+                tvStatus.setText(st == null
+                        ? "hook 没加载：LSPosed 里启用模块、作用域勾 com.miui.powerkeeper，再重启手机"
+                        : "hook 已加载但没回应：重启手机后再试");
+                tvDiag.setText("diag: no response / pkwl_hook=" + st);
             }
-        }, 10000);
-    }
-
-    private final java.util.concurrent.atomic.AtomicInteger seqGen =
-            new java.util.concurrent.atomic.AtomicInteger(1);
-
-    /** 兜底：从 Settings.Global 轮询同一份结果，不依赖 ordered broadcast 的 resultExtras */
-    private void pollResult(int seq, int attempt) {
-        ui.postDelayed(() -> {
-            String payload = readGlobal(Bridge.GK_RESULT);
-            if (payload != null) {
-                int bar = payload.indexOf('|');
-                if (bar > 0) {
-                    try {
-                        if (Integer.parseInt(payload.substring(0, bar).trim()) == seq) {
-                            String json = new String(android.util.Base64.decode(
-                                    payload.substring(bar + 1), android.util.Base64.NO_WRAP), "UTF-8");
-                            applyJson(json);
-                            return;
-                        }
-                    } catch (Throwable ignore) {
-                    }
-                }
-            }
-            if (!gotResponse && attempt < 20) pollResult(seq, attempt + 1);
-        }, 400);
-    }
-
-    private void applyJson(String json) {
-        try {
-            org.json.JSONArray arr = new org.json.JSONArray(json);
-            int n = 0;
-            for (int k = 0; k < arr.length(); k++) {
-                org.json.JSONObject o = arr.getJSONObject(k);
-                AppEntry e = adapter.find(o.optString("p"));
-                if (e == null) continue;
-                e.doze = o.optInt("d") == 1;
-                e.bg = o.optString("b", "");
-                e.mode = o.optInt("m");
-                String l = o.optString("l", null);
-                if (l != null) e.label = l;
-                n++;
-            }
-            gotResponse = true;
-            adapter.refresh();
-            tvStatus.setText("已同步 " + n + " 个应用");
-        } catch (Throwable t) {
-            tvStatus.setText("解析失败: " + t);
-        }
+        }, 5000);
     }
 
     private String readGlobal(String key) {
@@ -191,10 +139,9 @@ public class MainActivity extends AppCompatActivity {
         return readGlobal(Bridge.GK_STATUS);
     }
 
-    private void queryBatch(ArrayList<String> pkgs, int seq) {
+    private void queryBatch(ArrayList<String> pkgs) {
         Intent i = new Intent(Bridge.ACTION_QUERY).setPackage(Bridge.PKG);
         i.putStringArrayListExtra(Bridge.EXTRA_PKGS, pkgs);
-        i.putExtra(Bridge.EXTRA_SEQ, seq);
         BroadcastReceiver rr = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {

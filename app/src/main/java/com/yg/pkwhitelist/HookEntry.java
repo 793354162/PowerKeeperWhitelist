@@ -309,29 +309,18 @@ public class HookEntry extends XposedModule {
             @Override
             public void onReceive(Context context, Intent intent) {
                 try {
-                    publishStatus(context, "rx " + intent.getAction()
-                            + " from=" + sentFrom(this));
-                    if (!trusted(this)) {
-                        logi("reject untrusted sender");
-                        return;
-                    }
                     handle(this, intent);
                 } catch (Throwable t) {
                     logi("bridge error " + t);
-                    publishStatus(context, "rxErr " + t);
                 }
             }
         };
-        // 不用 registerReceiver 的 broadcastPermission 参数：
-        // 一旦发送方没拿到那个 signature 权限，广播会被系统静默丢弃，
-        // 表现就是「完全没响应」，排查起来很难受。
-        // 改成开放注册 + 收到后按发送方签名校验，效果等价、链路确定能通。
         if (Build.VERSION.SDK_INT >= 33) {
             c.registerReceiver(rcv, f, Context.RECEIVER_EXPORTED);
         } else {
             c.registerReceiver(rcv, f);
         }
-        diag = diag + " | bridge=open+sigcheck";
+        diag = diag + " | bridge=ok";
         publishStatus(c, diag);
         logi(diag);
     }
@@ -366,64 +355,13 @@ public class HookEntry extends XposedModule {
         logi("bgMap size=" + m.size());
     }
 
-    /** 把 hook 存活状态写到 Settings.Global，UI 收不到广播时也能判断是 hook 没加载还是通道断了 */
+    /** 把 hook 存活状态写到 Settings.Global，UI 用来区分「hook 没加载」和「通道没通」 */
     private void publishStatus(Context c, String s) {
         try {
             android.provider.Settings.Global.putString(c.getContentResolver(),
                     Bridge.GK_STATUS, s + " @" + System.currentTimeMillis());
         } catch (Throwable ignore) {
         }
-    }
-
-    /**
-     * 兜底回传：ordered broadcast 的 resultExtras 在某些 ROM 上会丢，
-     * 这里把同一份结果写进 Settings.Global，UI 轮询取。
-     */
-    private void publishResult(int seq, ArrayList<Bundle> rows) {
-        if (seq < 0 || ctx == null) return;
-        try {
-            org.json.JSONArray arr = new org.json.JSONArray();
-            for (Bundle b : rows) {
-                org.json.JSONObject o = new org.json.JSONObject();
-                o.put("p", b.getString(Bridge.KEY_PKG));
-                o.put("l", b.getString(Bridge.KEY_LABEL));
-                o.put("u", b.getInt(Bridge.KEY_UID));
-                o.put("s", b.getBoolean(Bridge.KEY_SYSTEM) ? 1 : 0);
-                o.put("d", b.getBoolean(Bridge.KEY_DOZE) ? 1 : 0);
-                o.put("b", b.getString(Bridge.KEY_BG, ""));
-                o.put("m", b.getInt(Bridge.KEY_MODE));
-                arr.put(o);
-            }
-            String payload = seq + "|" + android.util.Base64.encodeToString(
-                    arr.toString().getBytes("UTF-8"), android.util.Base64.NO_WRAP);
-            android.provider.Settings.Global.putString(ctx.getContentResolver(),
-                    Bridge.GK_RESULT, payload);
-        } catch (Throwable t) {
-            logi("publishResult " + t);
-        }
-    }
-
-    private String sentFrom(BroadcastReceiver r) {
-        try {
-            Method m = BroadcastReceiver.class.getDeclaredMethod("getSentFromPackage");
-            m.setAccessible(true);
-            Object v = m.invoke(r);
-            return v instanceof String ? (String) v : null;
-        } catch (Throwable ignore) {
-            return null;
-        }
-    }
-
-    /**
-     * 发送方校验。
-     * 目前只记录不拦截：先确认这台机器上 getSentFromPackage() 到底返回什么，
-     * 否则会像上一版那样「静默全拒」而完全无法排查。
-     */
-    private boolean trusted(BroadcastReceiver r) {
-        String from = sentFrom(r);
-        if (from == null || Bridge.MODULE_PKG.equals(from)) return true;
-        diag = diag + " | warnFrom=" + from;
-        return true;
     }
 
     private void handle(BroadcastReceiver r, Intent intent) {
@@ -447,8 +385,7 @@ public class HookEntry extends XposedModule {
             if (!PowerKeeperApi.lastError.isEmpty()) d += " | bg:" + PowerKeeperApi.lastError;
             if (!DeviceIdleApi.lastError.isEmpty()) d += " | idle:" + DeviceIdleApi.lastError;
             res.putString(Bridge.KEY_DIAG, d);
-            publishStatus(ctx, "q=" + (pkgs == null ? 0 : pkgs.size()) + " " + d);
-            publishResult(intent.getIntExtra(Bridge.EXTRA_SEQ, -1), out);
+            publishStatus(ctx, "q=" + (pkgs == null ? 0 : pkgs.size()));
             resultExtras(r, res);
         } else if (Bridge.ACTION_SET.equals(action)) {
             String pkg = intent.getStringExtra(Bridge.EXTRA_PKG);
