@@ -10,3 +10,4 @@ captures/
 *.apk
 *.aab
 app/libs/api-82.jar
+dist/
