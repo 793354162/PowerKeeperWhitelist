@@ -117,10 +117,25 @@ public class MainActivity extends AppCompatActivity {
         }
         ui.postDelayed(() -> {
             if (!gotResponse) {
-                tvStatus.setText("未收到 PowerKeeper 响应：确认 LSPosed 已启用模块并重启，作用域应为 com.miui.powerkeeper");
-                tvDiag.setText("diag: no response");
+                String st = readHookStatus();
+                if (st == null) {
+                    tvStatus.setText("hook 没加载：LSPosed 里启用模块、作用域勾 com.miui.powerkeeper，再重启手机");
+                    tvDiag.setText("diag: no response / pkwl_hook=null");
+                } else {
+                    tvStatus.setText("hook 已加载，但广播没通（下面是它的自报状态）");
+                    tvDiag.setText("diag: no response / pkwl_hook=" + st);
+                }
             }
         }, 4000);
+    }
+
+    /** hook 侧会把存活状态写进 Settings.Global，用来区分「没加载」和「广播断了」 */
+    private String readHookStatus() {
+        try {
+            return android.provider.Settings.Global.getString(getContentResolver(), "pkwl_hook");
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private void queryBatch(ArrayList<String> pkgs) {

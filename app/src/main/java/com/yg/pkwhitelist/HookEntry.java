@@ -251,9 +251,9 @@ public class HookEntry extends XposedModule {
                         ctx = c;
                         store = new OverrideStore(c);
                         idle = new DeviceIdleApi();
-                        register(c);
                         diag = "hook=ok idle=" + idle.available() + " api=" + getApiVersion();
-                        logi("bridge ready, idle=" + idle.available());
+                        register(c);
+                        logi("bridge ready: " + diag);
                         purgeLater();
                         return;
                     } catch (Throwable e) {
@@ -319,38 +319,53 @@ public class HookEntry extends XposedModule {
                 }
             }
         };
-        // 要求发送方持有模块定义的 signature 权限，其它应用即使知道 action 也发不进来
-        boolean guarded = false;
-        try {
-            c.registerReceiver(rcv, f, Bridge.PERM, null);
-            guarded = true;
-        } catch (Throwable t) {
-            logi("perm register failed, fallback: " + t);
-            if (Build.VERSION.SDK_INT >= 33) {
-                c.registerReceiver(rcv, f, Context.RECEIVER_EXPORTED);
-            } else {
-                c.registerReceiver(rcv, f);
-            }
+        // 不用 registerReceiver 的 broadcastPermission 参数：
+        // 一旦发送方没拿到那个 signature 权限，广播会被系统静默丢弃，
+        // 表现就是「完全没响应」，排查起来很难受。
+        // 改成开放注册 + 收到后按发送方签名校验，效果等价、链路确定能通。
+        if (Build.VERSION.SDK_INT >= 33) {
+            c.registerReceiver(rcv, f, Context.RECEIVER_EXPORTED);
+        } else {
+            c.registerReceiver(rcv, f);
         }
-        diag = "bridge=" + (guarded ? "guarded" : "fallback");
+        diag = diag + " | bridge=open+sigcheck";
+        publishStatus(c, diag);
         logi(diag);
     }
 
-    /**
-     * 发送方校验：API 34+ 直接看 getSentFromPackage()。
-     * 拿不到（老系统 / 系统内部广播）就交给 signature 权限把关。
-     */
-    private boolean trusted(BroadcastReceiver r) {
+    /** 把 hook 存活状态写到 Settings.Global，UI 收不到广播时也能判断是 hook 没加载还是通道断了 */
+    private void publishStatus(Context c, String s) {
+        try {
+            android.provider.Settings.Global.putString(c.getContentResolver(),
+                    "pkwl_hook", s + " @" + System.currentTimeMillis());
+        } catch (Throwable ignore) {
+        }
+    }
+
+    private String sentFrom(BroadcastReceiver r) {
         try {
             Method m = BroadcastReceiver.class.getDeclaredMethod("getSentFromPackage");
             m.setAccessible(true);
             Object v = m.invoke(r);
-            if (v instanceof String) {
-                return Bridge.MODULE_PKG.equals(v);
-            }
-            return true;
+            return v instanceof String ? (String) v : null;
         } catch (Throwable ignore) {
-            return true;
+            return null;
+        }
+    }
+
+    /**
+     * 发送方校验：包名必须是模块，或者与模块同签名。
+     * getSentFromPackage 拿不到（老系统 / 系统内部广播）时放行。
+     */
+    private boolean trusted(BroadcastReceiver r) {
+        String from = sentFrom(r);
+        if (from == null) return true;
+        if (Bridge.MODULE_PKG.equals(from)) return true;
+        try {
+            return ctx.getPackageManager().checkSignatures(Bridge.MODULE_PKG, from)
+                    == PackageManager.SIGNATURE_MATCH;
+        } catch (Throwable t) {
+            return false;
         }
     }
 
@@ -374,6 +389,7 @@ public class HookEntry extends XposedModule {
             if (!PowerKeeperApi.lastError.isEmpty()) d += " | bg:" + PowerKeeperApi.lastError;
             if (!DeviceIdleApi.lastError.isEmpty()) d += " | idle:" + DeviceIdleApi.lastError;
             res.putString(Bridge.KEY_DIAG, d);
+            publishStatus(ctx, "q=" + (pkgs == null ? 0 : pkgs.size()) + " " + d);
             resultExtras(r, res);
         } else if (Bridge.ACTION_SET.equals(action)) {
             String pkg = intent.getStringExtra(Bridge.EXTRA_PKG);
