@@ -1,6 +1,7 @@
 package com.yg.pkwhitelist;
 
 import android.app.Activity;
+import android.app.AndroidAppHelper;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -11,11 +12,11 @@ import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-import de.robv.android.xposed.AndroidAppHelper;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -192,7 +193,7 @@ public class HookEntry implements IXposedHookLoadPackage {
             @Override
             public void onReceive(Context context, Intent intent) {
                 try {
-                    handle(intent);
+                    handle(this, intent);
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + ": bridge error " + t);
                 }
@@ -209,7 +210,7 @@ public class HookEntry implements IXposedHookLoadPackage {
         }
     }
 
-    private void handle(Intent intent) {
+    private void handle(BroadcastReceiver r, Intent intent) {
         String action = intent.getAction();
         if (action == null) return;
         if (Bridge.ACTION_QUERY.equals(action)) {
@@ -223,7 +224,7 @@ public class HookEntry implements IXposedHookLoadPackage {
             }
             Bundle res = new Bundle();
             res.putParcelableArrayList(Bridge.EXTRA_RESULT, out);
-            setResultExtras(res);
+            resultExtras(r, res);
         } else if (Bridge.ACTION_SET.equals(action)) {
             String pkg = intent.getStringExtra(Bridge.EXTRA_PKG);
             int mode = intent.getIntExtra(Bridge.EXTRA_MODE, Bridge.MODE_FOLLOW);
@@ -231,12 +232,33 @@ public class HookEntry implements IXposedHookLoadPackage {
                 sStore.set(pkg, mode);
                 apply(pkg, mode);
             }
-            setResultCode(Activity.RESULT_OK);
+            resultCode(r, Activity.RESULT_OK);
         } else if (Bridge.ACTION_APPLY_ALL.equals(action)) {
             for (Map.Entry<String, Integer> e : sStore.all().entrySet()) {
                 apply(e.getKey(), e.getValue());
             }
-            setResultCode(Activity.RESULT_OK);
+            resultCode(r, Activity.RESULT_OK);
+        }
+    }
+
+    /** BroadcastReceiver.setResultExtras 是 @hide API，编译期不可见，只能反射 */
+    private static void resultExtras(BroadcastReceiver r, Bundle b) {
+        try {
+            Method m = BroadcastReceiver.class.getDeclaredMethod("setResultExtras", Bundle.class);
+            m.setAccessible(true);
+            m.invoke(r, b);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": setResultExtras failed " + t);
+        }
+    }
+
+    private static void resultCode(BroadcastReceiver r, int code) {
+        try {
+            Method m = BroadcastReceiver.class.getDeclaredMethod("setResultCode", int.class);
+            m.setAccessible(true);
+            m.invoke(r, code);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": setResultCode failed " + t);
         }
     }
 
