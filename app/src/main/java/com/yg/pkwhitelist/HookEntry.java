@@ -79,7 +79,7 @@ public class HookEntry extends XposedModule {
                     Class.forName("android.os.IDeviceIdleController"), String[].class);
             hook(add).setId("pk-add").intercept(chain -> {
                 Object[] args = chain.getArgs().toArray();
-                args[1] = filter((String[]) args[1]);
+                args[1] = filterForAdd((String[]) args[1]);
                 return chain.proceed(args);
             });
             try {
@@ -87,7 +87,7 @@ public class HookEntry extends XposedModule {
                         Class.forName("android.os.IDeviceIdleController"), String[].class);
                 hook(rm).setId("pk-rm").intercept(chain -> {
                     Object[] args = chain.getArgs().toArray();
-                    args[1] = filter((String[]) args[1]);
+                    args[1] = filterForRemove((String[]) args[1]);
                     return chain.proceed(args);
                 });
             } catch (NoSuchMethodException ignore) {
@@ -168,7 +168,8 @@ public class HookEntry extends XposedModule {
         return store.get(pkg);
     }
 
-    private String[] filter(String[] in) {
+    /** 加白名单：剔除 DENY，补齐 ALLOW */
+    private String[] filterForAdd(String[] in) {
         List<String> out = new ArrayList<>();
         if (in != null) {
             for (String p : in) {
@@ -180,6 +181,26 @@ public class HookEntry extends XposedModule {
         if (store != null) {
             for (Map.Entry<String, Integer> e : store.all().entrySet()) {
                 if (e.getValue() == Bridge.MODE_ALLOW && !out.contains(e.getKey())) {
+                    out.add(e.getKey());
+                }
+            }
+        }
+        return out.toArray(new String[0]);
+    }
+
+    /** 删白名单：剔除 ALLOW（别删它），保留 DENY（确保删掉） */
+    private String[] filterForRemove(String[] in) {
+        List<String> out = new ArrayList<>();
+        if (in != null) {
+            for (String p : in) {
+                if (p == null) continue;
+                if (modeOf(p) == Bridge.MODE_ALLOW) continue;
+                out.add(p);
+            }
+        }
+        if (store != null) {
+            for (Map.Entry<String, Integer> e : store.all().entrySet()) {
+                if (e.getValue() == Bridge.MODE_DENY && !out.contains(e.getKey())) {
                     out.add(e.getKey());
                 }
             }
