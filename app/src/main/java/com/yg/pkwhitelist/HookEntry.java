@@ -33,7 +33,7 @@ public class HookEntry extends XposedModule {
 
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
-        log(TAG + ": loaded in " + param.getProcessName() + " api=" + getApiVersion()
+        logi("loaded in " + param.getProcessName() + " api=" + getApiVersion()
                 + " fw=" + safeFramework());
     }
 
@@ -59,7 +59,7 @@ public class HookEntry extends XposedModule {
     private void fail(String where, Throwable t) {
         lastError = where + ": " + t;
         diag = "hook=failed " + lastError;
-        log(TAG + ": " + lastError);
+        logi("" + lastError);
     }
 
     // ---------- hooks ----------
@@ -200,7 +200,7 @@ public class HookEntry extends XposedModule {
                         idle = new DeviceIdleApi();
                         register(c);
                         diag = "hook=ok idle=" + idle.available() + " api=" + getApiVersion();
-                        log(TAG + ": bridge ready, idle=" + idle.available());
+                        logi("bridge ready, idle=" + idle.available());
                         return;
                     } catch (Throwable e) {
                         fail("bridge", e);
@@ -214,7 +214,7 @@ public class HookEntry extends XposedModule {
                 }
             }
             diag = "hook=ok ctx=null";
-            log(TAG + ": context not ready");
+            logi("context not ready");
         }, "pk-bridge");
         t.setDaemon(true);
         t.start();
@@ -242,7 +242,7 @@ public class HookEntry extends XposedModule {
                 try {
                     handle(this, intent);
                 } catch (Throwable t) {
-                    log(TAG + ": bridge error " + t);
+                    logi("bridge error " + t);
                 }
             }
         };
@@ -287,6 +287,32 @@ public class HookEntry extends XposedModule {
         }
     }
 
+    /** libxposed API 102: log(int priority, String tag, String msg) */
+    private void logi(String msg) {
+        try {
+            log(4, TAG, msg);
+        } catch (Throwable ignore) {
+        }
+    }
+
+    private static void resultExtras(BroadcastReceiver r, Bundle b) {
+        try {
+            java.lang.reflect.Method m = BroadcastReceiver.class.getDeclaredMethod("setResultExtras", Bundle.class);
+            m.setAccessible(true);
+            m.invoke(r, b);
+        } catch (Throwable ignore) {
+        }
+    }
+
+    private static void resultCode(BroadcastReceiver r, int code) {
+        try {
+            java.lang.reflect.Method m = BroadcastReceiver.class.getDeclaredMethod("setResultCode", int.class);
+            m.setAccessible(true);
+            m.invoke(r, code);
+        } catch (Throwable ignore) {
+        }
+    }
+
     private Bundle statusOf(String pkg) {
         try {
             PackageManager pm = ctx.getPackageManager();
@@ -322,7 +348,7 @@ public class HookEntry extends XposedModule {
                     break;
             }
         } catch (Throwable t) {
-            log(TAG + ": apply failed " + t);
+            logi("apply failed " + t);
         }
     }
 }
