@@ -29,11 +29,13 @@ public class MainActivity extends AppCompatActivity {
     private EditText etSearch;
     private CheckBox cbSystem;
     private TextView tvStatus;
+    private TextView tvDiag;
     private AppListAdapter adapter;
 
     private final List<AppEntry> all = new ArrayList<>();
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final java.util.concurrent.ExecutorService io = Executors.newSingleThreadExecutor();
+    private volatile boolean gotResponse;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -43,6 +45,7 @@ public class MainActivity extends AppCompatActivity {
         etSearch = findViewById(R.id.et_search);
         cbSystem = findViewById(R.id.cb_system);
         tvStatus = findViewById(R.id.tv_status);
+        tvDiag = findViewById(R.id.tv_diag);
         RecyclerView rv = findViewById(R.id.rv);
 
         adapter = new AppListAdapter(this::cycleMode);
@@ -62,7 +65,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void load() {
-        tvStatus.setText("加载应用中...");
+        tvStatus.setText("加载应用中…");
         io.execute(() -> {
             List<AppEntry> list = buildList();
             ui.post(() -> {
@@ -103,12 +106,20 @@ public class MainActivity extends AppCompatActivity {
 
     private void queryAll() {
         List<AppEntry> list = adapter.items();
+        gotResponse = false;
+        tvStatus.setText("查询中…");
         for (int i = 0; i < list.size(); i += 30) {
             List<AppEntry> batch = list.subList(i, Math.min(i + 30, list.size()));
             ArrayList<String> pkgs = new ArrayList<>();
             for (AppEntry e : batch) pkgs.add(e.pkg);
             queryBatch(pkgs);
         }
+        ui.postDelayed(() -> {
+            if (!gotResponse) {
+                tvStatus.setText("未收到 PowerKeeper 响应：确认 LSPosed 已启用模块并重启，作用域应为 com.miui.powerkeeper");
+                tvDiag.setText("diag: no response");
+            }
+        }, 4000);
     }
 
     private void queryBatch(ArrayList<String> pkgs) {
@@ -119,6 +130,9 @@ public class MainActivity extends AppCompatActivity {
             public void onReceive(Context context, Intent intent) {
                 Bundle res = getResultExtras(false);
                 if (res == null) return;
+                gotResponse = true;
+                String diag = res.getString(Bridge.KEY_DIAG);
+                if (diag != null) tvDiag.setText("diag: " + diag);
                 ArrayList<Bundle> list = res.getParcelableArrayList(Bridge.EXTRA_RESULT);
                 if (list == null) return;
                 for (Bundle b : list) {
@@ -131,12 +145,13 @@ public class MainActivity extends AppCompatActivity {
                     if (label != null) e.label = label;
                 }
                 adapter.notifyDataSetChanged();
+                tvStatus.setText("已同步 " + list.size() + " 个应用");
             }
         };
         try {
             sendOrderedBroadcast(i, null, rr, ui, Activity.RESULT_OK, null, null);
         } catch (Throwable t) {
-            Toast.makeText(this, "查询失败: " + t.getMessage(), Toast.LENGTH_SHORT).show();
+            tvStatus.setText("查询失败: " + t.getMessage());
         }
     }
 
@@ -150,6 +165,7 @@ public class MainActivity extends AppCompatActivity {
         if (next == Bridge.MODE_DENY) e.doze = false;
         adapter.notifyDataSetChanged();
         sendSet(e.pkg, next);
+        Toast.makeText(this, e.label + " → " + e.modeText(), Toast.LENGTH_SHORT).show();
     }
 
     private void sendSet(String pkg, int mode) {

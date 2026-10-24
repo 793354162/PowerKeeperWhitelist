@@ -36,8 +36,8 @@ android {
 }
 
 dependencies {
-    // Xposed API: 由 CI 或本地脚本下载到 libs/api-82.jar（见 README）
-    compileOnly files('libs/api-82.jar')
+    // Modern Xposed API (LSPosed 1.9.2+ / API 102)
+    compileOnly 'io.github.libxposed:api:102.0.0'
 
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'com.google.android.material:material:1.12.0'

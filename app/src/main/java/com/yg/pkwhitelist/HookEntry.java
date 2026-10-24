@@ -1,7 +1,6 @@
 package com.yg.pkwhitelist;
 
 import android.app.Activity;
-import android.app.AndroidAppHelper;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -10,170 +9,176 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
-import android.util.Log;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import io.github.libxposed.api.XposedInterface;
+import io.github.libxposed.api.XposedModule;
+import io.github.libxposed.api.XposedModuleInterface;
 
 /**
- * 运行在 com.miui.powerkeeper 进程（android.uid.system）里。
- *
- * 负责三件事：
- *  1. 拦截 PowerKeeper 往系统 Doze 白名单写名单（addPowerSaveWhitelistApps）；
- *  2. 伪造 isIgnoringBatteryOptimizations 的结果，解掉"智能被吸成无限制"；
- *  3. 注册广播桥，给模块 UI 提供查询与控制能力。
+ * libxposed API 102 入口，运行在 com.miui.powerkeeper 进程（android.uid.system）。
  */
-public class HookEntry implements IXposedHookLoadPackage {
+public class HookEntry extends XposedModule {
     private static final String TAG = "PKWL";
 
-    private static Context sCtx;
-    private static OverrideStore sStore;
-    private static DeviceIdleApi sIdle;
+    private volatile Context ctx;
+    private volatile OverrideStore store;
+    private volatile DeviceIdleApi idle;
+    private volatile String diag = "hook=installing";
+    private volatile String lastError = "";
 
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lp) {
-        if (!Bridge.PKG.equals(lp.packageName)) return;
-        if (lp.processName != null && !lp.processName.equals(Bridge.PKG)) return;
+    public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
+        log(TAG + ": loaded in " + param.getProcessName() + " api=" + getApiVersion()
+                + " fw=" + safeFramework());
+    }
 
+    @Override
+    public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
+        if (!Bridge.PKG.equals(param.getPackageName())) return;
         try {
-            sCtx = AndroidAppHelper.currentApplication();
-        } catch (Throwable ignore) {
+            installHooks(param.getDefaultClassLoader());
+        } catch (Throwable t) {
+            fail("install", t);
         }
-        if (sCtx == null) {
-            XposedBridge.log(TAG + ": no context, skip");
-            return;
+        startBridge();
+    }
+
+    private String safeFramework() {
+        try {
+            return getFrameworkName() + "/" + getFrameworkVersion();
+        } catch (Throwable t) {
+            return "unknown";
         }
-        sStore = new OverrideStore(sCtx);
-        sIdle = new DeviceIdleApi();
+    }
 
-        hookAddWhitelist(lp);
-        hookBatteryOptimization();
-        hookGetConfigure(lp);
-        hookSetConfigure(lp);
-        registerBridge();
-
-        XposedBridge.log(TAG + ": hooks installed, idle=" + sIdle.available());
+    private void fail(String where, Throwable t) {
+        lastError = where + ": " + t;
+        diag = "hook=failed " + lastError;
+        log(TAG + ": " + lastError);
     }
 
     // ---------- hooks ----------
 
-    private void hookAddWhitelist(XC_LoadPackage.LoadPackageParam lp) {
+    private void installHooks(ClassLoader cl) {
+        hookAddRemove(cl);
+        hookBatteryOptimization();
+        hookGetConfigure(cl);
+        hookSetConfigure(cl);
+        diag = "hook=ok api=" + getApiVersion();
+    }
+
+    private void hookAddRemove(ClassLoader cl) {
         try {
-            XposedHelpers.findAndHookMethod(
-                    "com.miui.powerkeeper.utils.CommonAdapter", lp.classLoader,
-                    "addPowerSaveWhitelistApps", "android.os.IDeviceIdleController", String[].class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            String[] in = (String[]) param.args[1];
-                            param.args[1] = filter(in, true);
-                        }
-                    });
+            Class<?> c = Class.forName("com.miui.powerkeeper.utils.CommonAdapter", false, cl);
+            Method add = c.getDeclaredMethod("addPowerSaveWhitelistApps",
+                    Class.forName("android.os.IDeviceIdleController"), String[].class);
+            hook(add).setId("pk-add").intercept(chain -> {
+                Object[] args = chain.getArgs().toArray();
+                args[1] = filter((String[]) args[1]);
+                return chain.proceed(args);
+            });
+            try {
+                Method rm = c.getDeclaredMethod("removePowerSaveWhitelistApps",
+                        Class.forName("android.os.IDeviceIdleController"), String[].class);
+                hook(rm).setId("pk-rm").intercept(chain -> {
+                    Object[] args = chain.getArgs().toArray();
+                    args[1] = filter((String[]) args[1]);
+                    return chain.proceed(args);
+                });
+            } catch (NoSuchMethodException ignore) {
+            }
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": hook addPowerSaveWhitelistApps failed: " + t);
-        }
-        try {
-            XposedHelpers.findAndHookMethod(
-                    "com.miui.powerkeeper.utils.CommonAdapter", lp.classLoader,
-                    "removePowerSaveWhitelistApps", "android.os.IDeviceIdleController", String[].class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            String[] in = (String[]) param.args[1];
-                            param.args[1] = filter(in, true);
-                        }
-                    });
-        } catch (Throwable ignore) {
+            fail("hookAddWhitelist", t);
         }
     }
 
     private void hookBatteryOptimization() {
         try {
-            XposedHelpers.findAndHookMethod(
-                    "android.os.PowerManager", null,
-                    "isIgnoringBatteryOptimizations", String.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            String pkg = (String) param.args[0];
-                            if (pkg == null) return;
-                            int mode = sStore.get(pkg);
-                            if (mode == Bridge.MODE_ALLOW) param.setResult(true);
-                            else if (mode == Bridge.MODE_DENY) param.setResult(false);
-                        }
-                    });
+            Method m = Class.forName("android.os.PowerManager")
+                    .getDeclaredMethod("isIgnoringBatteryOptimizations", String.class);
+            hook(m).setId("pk-ignore-batt").intercept(chain -> {
+                String pkg = (String) chain.getArg(0);
+                Object origin = chain.proceed();
+                if (pkg == null) return origin;
+                int mode = modeOf(pkg);
+                if (mode == Bridge.MODE_ALLOW) return Boolean.TRUE;
+                if (mode == Bridge.MODE_DENY) return Boolean.FALSE;
+                return origin;
+            });
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": hook isIgnoringBatteryOptimizations failed: " + t);
+            fail("hookBatteryOptimization", t);
         }
     }
 
-    private void hookGetConfigure(XC_LoadPackage.LoadPackageParam lp) {
+    private void hookGetConfigure(ClassLoader cl) {
         try {
-            XposedHelpers.findAndHookMethod(
-                    "com.miui.powerkeeper.provider.PowerSaveConfigureManager", lp.classLoader,
-                    "getPowerSaveAppConfigure", Bundle.class, Bundle.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            Bundle in = (Bundle) param.args[0];
-                            Bundle out = (Bundle) param.args[1];
-                            if (in == null || out == null) return;
-                            String pkg = in.getString("App");
-                            if (pkg == null) return;
-                            int mode = sStore.get(pkg);
-                            if (mode != Bridge.MODE_FOLLOW) {
-                                out.putString("AppConfigure", PowerKeeperApi.interfaceValue(mode));
-                            }
+            Class<?> c = Class.forName("com.miui.powerkeeper.provider.PowerSaveConfigureManager", false, cl);
+            Method m = c.getDeclaredMethod("getPowerSaveAppConfigure", Bundle.class, Bundle.class);
+            hook(m).setId("pk-get-cfg").intercept(chain -> {
+                Object r = chain.proceed();
+                try {
+                    Bundle in = (Bundle) chain.getArg(0);
+                    Bundle out = (Bundle) chain.getArg(1);
+                    if (in != null && out != null) {
+                        String pkg = in.getString("App");
+                        int mode = modeOf(pkg);
+                        if (mode != Bridge.MODE_FOLLOW) {
+                            out.putString("AppConfigure", PowerKeeperApi.interfaceValue(mode));
                         }
-                    });
+                    }
+                } catch (Throwable ignore) {
+                }
+                return r;
+            });
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": hook getPowerSaveAppConfigure failed: " + t);
+            fail("hookGetConfigure", t);
         }
     }
 
-    private void hookSetConfigure(XC_LoadPackage.LoadPackageParam lp) {
+    private void hookSetConfigure(ClassLoader cl) {
         try {
-            XposedHelpers.findAndHookMethod(
-                    "com.miui.powerkeeper.provider.PowerSaveConfigureManager", lp.classLoader,
-                    "setPowerSaveAppConfigure", Bundle.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            Bundle b = (Bundle) param.args[0];
-                            if (b == null) return;
-                            String pkg = b.getString("App");
-                            if (pkg == null) return;
-                            int mode = sStore.get(pkg);
-                            if (mode != Bridge.MODE_FOLLOW) {
-                                b.putString("AppConfigure", PowerKeeperApi.interfaceValue(mode));
-                            }
+            Class<?> c = Class.forName("com.miui.powerkeeper.provider.PowerSaveConfigureManager", false, cl);
+            Method m = c.getDeclaredMethod("setPowerSaveAppConfigure", Bundle.class);
+            hook(m).setId("pk-set-cfg").intercept(chain -> {
+                try {
+                    Bundle b = (Bundle) chain.getArg(0);
+                    if (b != null) {
+                        String pkg = b.getString("App");
+                        int mode = modeOf(pkg);
+                        if (mode != Bridge.MODE_FOLLOW) {
+                            b.putString("AppConfigure", PowerKeeperApi.interfaceValue(mode));
                         }
-                    });
+                    }
+                } catch (Throwable ignore) {
+                }
+                return chain.proceed();
+            });
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": hook setPowerSaveAppConfigure failed: " + t);
+            fail("hookSetConfigure", t);
         }
     }
 
-    /** 按 override 表过滤名单：DENY 剔除，ALLOW 补齐 */
-    private String[] filter(String[] in, boolean allowAdd) {
+    private int modeOf(String pkg) {
+        if (pkg == null || store == null) return Bridge.MODE_FOLLOW;
+        return store.get(pkg);
+    }
+
+    private String[] filter(String[] in) {
         List<String> out = new ArrayList<>();
         if (in != null) {
             for (String p : in) {
                 if (p == null) continue;
-                if (sStore.get(p) == Bridge.MODE_DENY) continue;
+                if (modeOf(p) == Bridge.MODE_DENY) continue;
                 out.add(p);
             }
         }
-        if (allowAdd) {
-            for (Map.Entry<String, Integer> e : sStore.all().entrySet()) {
+        if (store != null) {
+            for (Map.Entry<String, Integer> e : store.all().entrySet()) {
                 if (e.getValue() == Bridge.MODE_ALLOW && !out.contains(e.getKey())) {
                     out.add(e.getKey());
                 }
@@ -184,7 +189,49 @@ public class HookEntry implements IXposedHookLoadPackage {
 
     // ---------- bridge ----------
 
-    private void registerBridge() {
+    private void startBridge() {
+        Thread t = new Thread(() -> {
+            for (int i = 0; i < 200; i++) {
+                Context c = currentApp();
+                if (c != null) {
+                    try {
+                        ctx = c;
+                        store = new OverrideStore(c);
+                        idle = new DeviceIdleApi();
+                        register(c);
+                        diag = "hook=ok idle=" + idle.available() + " api=" + getApiVersion();
+                        log(TAG + ": bridge ready, idle=" + idle.available());
+                        return;
+                    } catch (Throwable e) {
+                        fail("bridge", e);
+                        return;
+                    }
+                }
+                try {
+                    Thread.sleep(150);
+                } catch (InterruptedException ignore) {
+                    return;
+                }
+            }
+            diag = "hook=ok ctx=null";
+            log(TAG + ": context not ready");
+        }, "pk-bridge");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static Context currentApp() {
+        try {
+            Class<?> at = Class.forName("android.app.ActivityThread");
+            Method m = at.getDeclaredMethod("currentApplication");
+            m.setAccessible(true);
+            return (Context) m.invoke(null);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private void register(Context c) {
         IntentFilter f = new IntentFilter();
         f.addAction(Bridge.ACTION_QUERY);
         f.addAction(Bridge.ACTION_SET);
@@ -195,18 +242,14 @@ public class HookEntry implements IXposedHookLoadPackage {
                 try {
                     handle(this, intent);
                 } catch (Throwable t) {
-                    XposedBridge.log(TAG + ": bridge error " + t);
+                    log(TAG + ": bridge error " + t);
                 }
             }
         };
-        try {
-            if (Build.VERSION.SDK_INT >= 33) {
-                sCtx.registerReceiver(rcv, f, Context.RECEIVER_EXPORTED);
-            } else {
-                sCtx.registerReceiver(rcv, f);
-            }
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": registerReceiver failed: " + t);
+        if (Build.VERSION.SDK_INT >= 33) {
+            c.registerReceiver(rcv, f, Context.RECEIVER_EXPORTED);
+        } else {
+            c.registerReceiver(rcv, f);
         }
     }
 
@@ -224,57 +267,39 @@ public class HookEntry implements IXposedHookLoadPackage {
             }
             Bundle res = new Bundle();
             res.putParcelableArrayList(Bridge.EXTRA_RESULT, out);
+            res.putString(Bridge.KEY_DIAG, diag + (lastError.isEmpty() ? "" : " | " + lastError));
             resultExtras(r, res);
         } else if (Bridge.ACTION_SET.equals(action)) {
             String pkg = intent.getStringExtra(Bridge.EXTRA_PKG);
             int mode = intent.getIntExtra(Bridge.EXTRA_MODE, Bridge.MODE_FOLLOW);
-            if (pkg != null) {
-                sStore.set(pkg, mode);
+            if (pkg != null && store != null) {
+                store.set(pkg, mode);
                 apply(pkg, mode);
             }
             resultCode(r, Activity.RESULT_OK);
         } else if (Bridge.ACTION_APPLY_ALL.equals(action)) {
-            for (Map.Entry<String, Integer> e : sStore.all().entrySet()) {
-                apply(e.getKey(), e.getValue());
+            if (store != null) {
+                for (Map.Entry<String, Integer> e : store.all().entrySet()) {
+                    apply(e.getKey(), e.getValue());
+                }
             }
             resultCode(r, Activity.RESULT_OK);
-        }
-    }
-
-    /** BroadcastReceiver.setResultExtras 是 @hide API，编译期不可见，只能反射 */
-    private static void resultExtras(BroadcastReceiver r, Bundle b) {
-        try {
-            Method m = BroadcastReceiver.class.getDeclaredMethod("setResultExtras", Bundle.class);
-            m.setAccessible(true);
-            m.invoke(r, b);
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": setResultExtras failed " + t);
-        }
-    }
-
-    private static void resultCode(BroadcastReceiver r, int code) {
-        try {
-            Method m = BroadcastReceiver.class.getDeclaredMethod("setResultCode", int.class);
-            m.setAccessible(true);
-            m.invoke(r, code);
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": setResultCode failed " + t);
         }
     }
 
     private Bundle statusOf(String pkg) {
         try {
-            PackageManager pm = sCtx.getPackageManager();
+            PackageManager pm = ctx.getPackageManager();
             ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
             Bundle b = new Bundle();
             b.putString(Bridge.KEY_PKG, pkg);
             b.putString(Bridge.KEY_LABEL, String.valueOf(ai.loadLabel(pm)));
             b.putInt(Bridge.KEY_UID, ai.uid);
             b.putBoolean(Bridge.KEY_SYSTEM, (ai.flags & ApplicationInfo.FLAG_SYSTEM) != 0);
-            b.putBoolean(Bridge.KEY_DOZE, sIdle.isWhitelisted(pkg, 0));
-            String bg = PowerKeeperApi.readBgControl(sCtx, pkg);
+            b.putBoolean(Bridge.KEY_DOZE, idle != null && idle.isWhitelisted(pkg, 0));
+            String bg = PowerKeeperApi.readBgControl(ctx, pkg);
             b.putString(Bridge.KEY_BG, bg == null ? "" : bg);
-            b.putInt(Bridge.KEY_MODE, sStore.get(pkg));
+            b.putInt(Bridge.KEY_MODE, modeOf(pkg));
             return b;
         } catch (Throwable t) {
             return null;
@@ -282,18 +307,22 @@ public class HookEntry implements IXposedHookLoadPackage {
     }
 
     private void apply(String pkg, int mode) {
-        switch (mode) {
-            case Bridge.MODE_ALLOW:
-                sIdle.add(pkg);
-                PowerKeeperApi.writeBgControl(sCtx, pkg, "no_restrict");
-                break;
-            case Bridge.MODE_DENY:
-                sIdle.remove(pkg);
-                PowerKeeperApi.writeBgControl(sCtx, pkg, "restrict_bg");
-                break;
-            default:
-                PowerKeeperApi.writeBgControl(sCtx, pkg, "miui_auto");
-                break;
+        try {
+            switch (mode) {
+                case Bridge.MODE_ALLOW:
+                    if (idle != null) idle.add(pkg);
+                    PowerKeeperApi.writeBgControl(ctx, pkg, "no_restrict");
+                    break;
+                case Bridge.MODE_DENY:
+                    if (idle != null) idle.remove(pkg);
+                    PowerKeeperApi.writeBgControl(ctx, pkg, "restrict_bg");
+                    break;
+                default:
+                    PowerKeeperApi.writeBgControl(ctx, pkg, "miui_auto");
+                    break;
+            }
+        } catch (Throwable t) {
+            log(TAG + ": apply failed " + t);
         }
     }
 }

@@ -1,8 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">PowerKeeper 白名单</string>
+    <string name="app_name">WhiteList</string>
     <string name="xposed_description">查看并控制 PowerKeeper 后台运行白名单</string>
-    <string-array name="xposed_scope">
-        <item>com.miui.powerkeeper</item>
-    </string-array>
 </resources>

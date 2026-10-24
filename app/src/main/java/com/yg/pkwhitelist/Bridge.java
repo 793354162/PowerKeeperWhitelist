@@ -24,6 +24,7 @@ public final class Bridge {
     public static final String KEY_DOZE = "doze";
     public static final String KEY_BG = "bg";
     public static final String KEY_MODE = "mode";
+    public static final String KEY_DIAG = "diag";
 
     public static final int MODE_FOLLOW = 0;
     public static final int MODE_ALLOW = 1;

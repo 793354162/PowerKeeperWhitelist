@@ -41,13 +41,6 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Fetch Xposed API 82
-        run: |
-          mkdir -p app/libs
-          curl -fsSL -o app/libs/api-82.jar \
-            https://api.xposed.info/de/robv/android/xposed/api/82/api-82.jar
-          ls -l app/libs
-
       - name: Build debug
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
