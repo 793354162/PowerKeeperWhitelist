@@ -11,7 +11,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
-import android.view.View;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.TextView;
@@ -63,7 +62,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void load() {
-        tvStatus.setText("加载应用中�?);
+        tvStatus.setText("加载应用中...");
         io.execute(() -> {
             List<AppEntry> list = buildList();
             ui.post(() -> {
@@ -99,7 +98,7 @@ public class MainActivity extends AppCompatActivity {
             filtered.add(e);
         }
         adapter.submit(filtered);
-        tvStatus.setText("�?" + all.size() + " 个应用，当前显示 " + filtered.size());
+        tvStatus.setText("共 " + all.size() + " 个应用，当前显示 " + filtered.size());
     }
 
     private void queryAll() {
@@ -128,9 +127,8 @@ public class MainActivity extends AppCompatActivity {
                     e.doze = b.getBoolean(Bridge.KEY_DOZE, false);
                     e.bg = b.getString(Bridge.KEY_BG, "");
                     e.mode = b.getInt(Bridge.KEY_MODE, Bridge.MODE_FOLLOW);
-                    if (b.getString(Bridge.KEY_LABEL) != null) {
-                        e.label = b.getString(Bridge.KEY_LABEL);
-                    }
+                    String label = b.getString(Bridge.KEY_LABEL);
+                    if (label != null) e.label = label;
                 }
                 adapter.notifyDataSetChanged();
             }
@@ -138,7 +136,7 @@ public class MainActivity extends AppCompatActivity {
         try {
             sendOrderedBroadcast(i, null, rr, ui, Activity.RESULT_OK, null, null);
         } catch (Throwable t) {
-            Toast.makeText(this, "查询失败�? + t.getMessage(), Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "查询失败: " + t.getMessage(), Toast.LENGTH_SHORT).show();
         }
     }
 
