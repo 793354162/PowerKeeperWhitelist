@@ -144,7 +144,7 @@ public class MainActivity extends AppCompatActivity {
                     String label = b.getString(Bridge.KEY_LABEL);
                     if (label != null) e.label = label;
                 }
-                adapter.notifyDataSetChanged();
+                adapter.refresh();
                 tvStatus.setText("已同步 " + list.size() + " 个应用");
             }
         };
@@ -163,7 +163,7 @@ public class MainActivity extends AppCompatActivity {
         e.mode = next;
         if (next == Bridge.MODE_ALLOW) e.doze = true;
         if (next == Bridge.MODE_DENY) e.doze = false;
-        adapter.notifyDataSetChanged();
+        adapter.refresh();
         sendSet(e.pkg, next);
         Toast.makeText(this, e.label + " → " + e.modeText(), Toast.LENGTH_SHORT).show();
     }
@@ -179,7 +179,7 @@ public class MainActivity extends AppCompatActivity {
         Intent i = new Intent(Bridge.ACTION_APPLY_ALL).setPackage(Bridge.PKG);
         sendOrderedBroadcast(i, null, null, null, Activity.RESULT_OK, null, null);
         for (AppEntry e : all) e.mode = Bridge.MODE_FOLLOW;
-        adapter.notifyDataSetChanged();
+        adapter.refresh();
         Toast.makeText(this, "已重置为跟随系统", Toast.LENGTH_SHORT).show();
     }
 

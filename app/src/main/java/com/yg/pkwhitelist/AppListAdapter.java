@@ -13,46 +13,115 @@ import androidx.recyclerview.widget.RecyclerView;
 import java.util.ArrayList;
 import java.util.List;
 
-public class AppListAdapter extends RecyclerView.Adapter<AppListAdapter.VH> {
+public class AppListAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+
+    private static final int TYPE_HEADER = 0;
+    private static final int TYPE_APP = 1;
 
     public interface OnClick {
         void onClick(AppEntry entry);
     }
 
-    private final List<AppEntry> data = new ArrayList<>();
+    private static class Row {
+        int type;
+        String title;
+        AppEntry entry;
+    }
+
+    private final List<AppEntry> source = new ArrayList<>();
+    private final List<Row> rows = new ArrayList<>();
     private final OnClick onClick;
 
     public AppListAdapter(OnClick onClick) {
         this.onClick = onClick;
     }
 
+    /** 传入过滤后的应用列表，内部按白名单/非白名单分组 */
     public void submit(List<AppEntry> list) {
-        data.clear();
-        data.addAll(list);
+        source.clear();
+        source.addAll(list);
+        rebuild();
         notifyDataSetChanged();
     }
 
+    /** 状态更新后重新分组（doze 状态变化会影响归属） */
+    public void refresh() {
+        rebuild();
+        notifyDataSetChanged();
+    }
+
+    private void rebuild() {
+        rows.clear();
+        List<AppEntry> white = new ArrayList<>();
+        List<AppEntry> other = new ArrayList<>();
+        for (AppEntry e : source) {
+            if (e.doze) white.add(e);
+            else other.add(e);
+        }
+        if (!white.isEmpty()) {
+            rows.add(header("白名单 · " + white.size()));
+            for (AppEntry e : white) rows.add(app(e));
+        }
+        if (!other.isEmpty()) {
+            rows.add(header("非白名单 · " + other.size()));
+            for (AppEntry e : other) rows.add(app(e));
+        }
+    }
+
+    private static Row header(String t) {
+        Row r = new Row();
+        r.type = TYPE_HEADER;
+        r.title = t;
+        return r;
+    }
+
+    private static Row app(AppEntry e) {
+        Row r = new Row();
+        r.type = TYPE_APP;
+        r.entry = e;
+        return r;
+    }
+
     public List<AppEntry> items() {
-        return data;
+        return source;
     }
 
     public AppEntry find(String pkg) {
-        for (AppEntry e : data) {
+        for (AppEntry e : source) {
             if (e.pkg.equals(pkg)) return e;
         }
         return null;
     }
 
-    @NonNull
     @Override
-    public VH onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
-        View v = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_app, parent, false);
-        return new VH(v);
+    public int getItemViewType(int position) {
+        return rows.get(position).type;
     }
 
     @Override
-    public void onBindViewHolder(@NonNull VH h, int position) {
-        AppEntry e = data.get(position);
+    public int getItemCount() {
+        return rows.size();
+    }
+
+    @NonNull
+    @Override
+    public RecyclerView.ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+        LayoutInflater inf = LayoutInflater.from(parent.getContext());
+        if (viewType == TYPE_HEADER) {
+            return new HeaderVH(inf.inflate(R.layout.item_header, parent, false));
+        }
+        return new AppVH(inf.inflate(R.layout.item_app, parent, false));
+    }
+
+    @Override
+    public void onBindViewHolder(@NonNull RecyclerView.ViewHolder holder, int position) {
+        Row row = rows.get(position);
+        if (row.type == TYPE_HEADER) {
+            ((HeaderVH) holder).title.setText(row.title);
+            return;
+        }
+        AppVH h = (AppVH) holder;
+        AppEntry e = row.entry;
         h.title.setText(e.label);
         h.sub.setText(e.pkg);
 
@@ -105,19 +174,23 @@ public class AppListAdapter extends RecyclerView.Adapter<AppListAdapter.VH> {
                 ContextCompat.getColor(v.getContext(), bgRes)));
     }
 
-    @Override
-    public int getItemCount() {
-        return data.size();
+    static class HeaderVH extends RecyclerView.ViewHolder {
+        final TextView title;
+
+        HeaderVH(@NonNull View itemView) {
+            super(itemView);
+            title = itemView.findViewById(R.id.tv_header);
+        }
     }
 
-    static class VH extends RecyclerView.ViewHolder {
+    static class AppVH extends RecyclerView.ViewHolder {
         final TextView title;
         final TextView sub;
         final TextView doze;
         final TextView policy;
         final TextView mode;
 
-        VH(@NonNull View itemView) {
+        AppVH(@NonNull View itemView) {
             super(itemView);
             title = itemView.findViewById(R.id.tv_title);
             sub = itemView.findViewById(R.id.tv_sub);
