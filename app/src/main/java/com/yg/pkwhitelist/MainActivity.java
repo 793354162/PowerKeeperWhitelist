@@ -60,6 +60,7 @@ public class MainActivity extends AppCompatActivity {
         cbSystem.setOnCheckedChangeListener((v, b) -> applyFilter());
         findViewById(R.id.btn_refresh).setOnClickListener(v -> load());
         findViewById(R.id.btn_reset).setOnClickListener(v -> resetAll());
+        findViewById(R.id.btn_clear).setOnClickListener(v -> confirmClear());
 
         load();
     }
@@ -181,6 +182,51 @@ public class MainActivity extends AppCompatActivity {
         for (AppEntry e : all) e.mode = Bridge.MODE_FOLLOW;
         adapter.refresh();
         Toast.makeText(this, "已重置为跟随系统", Toast.LENGTH_SHORT).show();
+    }
+
+    private void confirmClear() {
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("彻底清除")
+                .setMessage("会把动过的东西全部还原到第一次强制之前的状态：\n\n"
+                        + "· doze 白名单按原始快照恢复\n"
+                        + "· 后台策略恢复原值\n"
+                        + "· 删除模块插入的 userTable 行\n"
+                        + "· 常驻 always-white 集合里被踢掉的包加回去\n"
+                        + "· 清空模块自己的 SharedPreferences\n\n"
+                        + "清除后建议重启一次 PowerKeeper 进程（重启手机最稳）。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("清除", (d, w) -> doClear())
+                .show();
+    }
+
+    private void doClear() {
+        tvStatus.setText("清除中…");
+        Intent i = new Intent(Bridge.ACTION_CLEAR).setPackage(Bridge.PKG);
+        BroadcastReceiver rr = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                Bundle res = getResultExtras(false);
+                String report = res == null ? null : res.getString(Bridge.KEY_REPORT);
+                tvDiag.setText("diag: " + (report == null ? "no response" : report));
+                if (report == null) {
+                    tvStatus.setText("未收到 PowerKeeper 响应");
+                    Toast.makeText(MainActivity.this, "未收到响应", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                tvStatus.setText("已清除");
+                Toast.makeText(MainActivity.this, report, Toast.LENGTH_LONG).show();
+                for (AppEntry e : all) {
+                    e.mode = Bridge.MODE_FOLLOW;
+                    e.bg = "";
+                }
+                load();
+            }
+        };
+        try {
+            sendOrderedBroadcast(i, null, rr, ui, Activity.RESULT_OK, null, null);
+        } catch (Throwable t) {
+            tvStatus.setText("清除失败: " + t.getMessage());
+        }
     }
 
     @Override

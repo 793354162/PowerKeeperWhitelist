@@ -304,20 +304,53 @@ public class HookEntry extends XposedModule {
         f.addAction(Bridge.ACTION_QUERY);
         f.addAction(Bridge.ACTION_SET);
         f.addAction(Bridge.ACTION_APPLY_ALL);
+        f.addAction(Bridge.ACTION_CLEAR);
         BroadcastReceiver rcv = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
                 try {
+                    if (!trusted(this)) {
+                        logi("reject untrusted sender");
+                        return;
+                    }
                     handle(this, intent);
                 } catch (Throwable t) {
                     logi("bridge error " + t);
                 }
             }
         };
-        if (Build.VERSION.SDK_INT >= 33) {
-            c.registerReceiver(rcv, f, Context.RECEIVER_EXPORTED);
-        } else {
-            c.registerReceiver(rcv, f);
+        // 要求发送方持有模块定义的 signature 权限，其它应用即使知道 action 也发不进来
+        boolean guarded = false;
+        try {
+            c.registerReceiver(rcv, f, Bridge.PERM, null);
+            guarded = true;
+        } catch (Throwable t) {
+            logi("perm register failed, fallback: " + t);
+            if (Build.VERSION.SDK_INT >= 33) {
+                c.registerReceiver(rcv, f, Context.RECEIVER_EXPORTED);
+            } else {
+                c.registerReceiver(rcv, f);
+            }
+        }
+        diag = "bridge=" + (guarded ? "guarded" : "fallback");
+        logi(diag);
+    }
+
+    /**
+     * 发送方校验：API 34+ 直接看 getSentFromPackage()。
+     * 拿不到（老系统 / 系统内部广播）就交给 signature 权限把关。
+     */
+    private boolean trusted(BroadcastReceiver r) {
+        try {
+            Method m = BroadcastReceiver.class.getDeclaredMethod("getSentFromPackage");
+            m.setAccessible(true);
+            Object v = m.invoke(r);
+            if (v instanceof String) {
+                return Bridge.MODULE_PKG.equals(v);
+            }
+            return true;
+        } catch (Throwable ignore) {
+            return true;
         }
     }
 
@@ -346,16 +379,25 @@ public class HookEntry extends XposedModule {
             String pkg = intent.getStringExtra(Bridge.EXTRA_PKG);
             int mode = intent.getIntExtra(Bridge.EXTRA_MODE, Bridge.MODE_FOLLOW);
             if (pkg != null && store != null) {
+                int old = store.get(pkg);
                 store.set(pkg, mode);
-                apply(pkg, mode);
+                // 只有从「跟随」第一次切过去时才抓快照，避免把已污染的状态当成原始值
+                apply(pkg, mode, old == Bridge.MODE_FOLLOW);
             }
             resultCode(r, Activity.RESULT_OK);
         } else if (Bridge.ACTION_APPLY_ALL.equals(action)) {
             if (store != null) {
                 for (Map.Entry<String, Integer> e : store.all().entrySet()) {
-                    apply(e.getKey(), e.getValue());
+                    apply(e.getKey(), e.getValue(), false);
                 }
             }
+            resultCode(r, Activity.RESULT_OK);
+        } else if (Bridge.ACTION_CLEAR.equals(action)) {
+            String report = clearAll();
+            Bundle res = new Bundle();
+            res.putString(Bridge.KEY_REPORT, report);
+            res.putString(Bridge.KEY_DIAG, diag);
+            resultExtras(r, res);
             resultCode(r, Activity.RESULT_OK);
         }
     }
@@ -405,7 +447,7 @@ public class HookEntry extends XposedModule {
         }
     }
 
-    private void apply(String pkg, int mode) {
+    private void apply(String pkg, int mode, boolean captureOrig) {
         try {
             switch (mode) {
                 case Bridge.MODE_ALLOW:
@@ -413,10 +455,20 @@ public class HookEntry extends XposedModule {
                     PowerKeeperApi.writeBgControl(ctx, pkg, "no_restrict");
                     break;
                 case Bridge.MODE_DENY: {
+                    // 先抓原始状态，清除时才能还原
+                    lastEnforce.put(pkg, System.currentTimeMillis());
+                    boolean wasDoze = idle != null && idle.isWhitelisted(pkg, 0);
+                    String wasBg = PowerKeeperApi.readBgControl(ctx, pkg);
                     // 智能限制 + 清零一切白名单豁免：补行 -> 移出 doze -> 写 miui_auto
-                    String r = PowerKeeperApi.enforce(ctx, pkg, idle);
+                    String row = PowerKeeperApi.ensureRow(ctx, pkg);
+                    if (store != null && captureOrig) {
+                        store.saveOrigIfAbsent(pkg, wasDoze, wasBg, PowerKeeperApi.wasInserted(row));
+                    }
+                    boolean rm = idle != null && idle.removeForce(pkg);
+                    boolean w = PowerKeeperApi.writeBgControl(ctx, pkg, "miui_auto");
                     purgeAlwaysWhite();
-                    diag = "enforce " + pkg + " " + r;
+                    diag = "enforce " + pkg + " row[" + row + "] rm=" + rm + " write=" + w
+                            + " orig=" + (wasDoze ? "D1" : "D0") + "/" + wasBg;
                     logi(diag);
                     break;
                 }
@@ -462,9 +514,90 @@ public class HookEntry extends XposedModule {
                 }
             }
             if (!drop.isEmpty() && set.removeAll(drop)) {
+                if (store != null) {
+                    for (String p : drop) store.markPurged(p);
+                }
                 logi("purged " + field + " " + drop);
             }
         } catch (Throwable ignore) {
         }
+    }
+
+    /**
+     * 一键清除：把动过的东西全部还原到第一次强制之前的状态。
+     *  - doze 白名单：按快照恢复（原本在就加回，原本不在就移除）
+     *  - bgControl：恢复快照里的原值，没有快照的退回 miuiAuto
+     *  - 由我们插入的 userTable 行：删除
+     *  - 被踢出 sAlwaysWhiteApps 的包：加回去
+     *  - SharedPreferences：整个清空
+     */
+    private String clearAll() {
+        if (store == null || ctx == null || idle == null) return "store=null";
+        Map<String, Integer> all = store.all();
+        int total = 0, restored = 0, rowsDeleted = 0, alwaysBack = 0;
+        StringBuilder err = new StringBuilder();
+        for (String pkg : all.keySet()) {
+            total++;
+            String snap = store.orig(pkg);
+            if (snap == null) {
+                PowerKeeperApi.writeBgControl(ctx, pkg, "miui_auto");
+                continue;
+            }
+            boolean wasDoze = snap.contains("D1");
+            String wasBg = between(snap, "|B", "|I");
+            try {
+                if (wasDoze) {
+                    idle.add(pkg);
+                } else {
+                    idle.removeForce(pkg);
+                }
+                PowerKeeperApi.writeBgControl(ctx, pkg, PowerKeeperApi.toInterface(wasBg));
+                if (snap.endsWith("|I1")) {
+                    String d = PowerKeeperApi.deleteRow(ctx, pkg);
+                    if (d.startsWith("del=1")) rowsDeleted++;
+                }
+                restored++;
+            } catch (Throwable t) {
+                err.append(pkg).append(':').append(t.getClass().getSimpleName()).append(' ');
+            }
+        }
+        alwaysBack = restoreAlwaysWhite(store.purged());
+        store.wipe();
+        diag = "cleared=" + total + " restored=" + restored
+                + " rows=" + rowsDeleted + " alwaysBack=" + alwaysBack
+                + (err.length() > 0 ? " err=" + err : "");
+        logi(diag);
+        return diag;
+    }
+
+    /** 把之前被 purge 掉的包加回 sAlwaysWhiteApps */
+    private int restoreAlwaysWhite(java.util.Set<String> pkgs) {
+        if (pkgs == null || pkgs.isEmpty()) return 0;
+        int n = 0;
+        try {
+            Class<?> dc = Class.forName("com.miui.powerkeeper.controller.DeviceIdleController",
+                    false, ctx.getClassLoader());
+            java.lang.reflect.Field f = dc.getDeclaredField("sAlwaysWhiteApps");
+            f.setAccessible(true);
+            Object v = f.get(null);
+            if (v instanceof java.util.Set) {
+                java.util.Set<String> set = (java.util.Set<String>) v;
+                for (String p : pkgs) {
+                    if (set.add(p)) n++;
+                }
+            }
+        } catch (Throwable t) {
+            logi("restoreAlwaysWhite " + t);
+        }
+        return n;
+    }
+
+    private static String between(String s, String start, String end) {
+        int a = s.indexOf(start);
+        if (a < 0) return null;
+        a += start.length();
+        int b = s.indexOf(end, a);
+        if (b < 0) b = s.length();
+        return s.substring(a, b);
     }
 }

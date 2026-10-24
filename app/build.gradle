@@ -2,6 +2,17 @@ plugins {
     id 'com.android.application'
 }
 
+// 固定签名：keystore/pkwl.b64 是同一个 keystore 的 base64。
+// 以前每个 CI runner 都会新生成 ~/.android/debug.keystore，导致每次签名不同、
+// 无法覆盖安装。现在签名固定，版本升级只需要改 versionCode / versionName。
+def fixedKs = new File(layout.buildDirectory.get().asFile, "pkwl.jks")
+def fixedKsSrc = file("$rootDir/keystore/pkwl.b64")
+if (fixedKsSrc.exists()) {
+    fixedKs.parentFile.mkdirs()
+    fixedKs.bytes = java.util.Base64.decoder.decode(fixedKsSrc.text.replaceAll("\\s", ""))
+}
+def hasFixedKs = fixedKs.exists()
+
 android {
     namespace 'com.yg.pkwhitelist'
     compileSdk 34
@@ -10,15 +21,29 @@ android {
         applicationId "com.yg.pkwhitelist"
         minSdk 29
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 3
+        versionName "1.2"
+    }
+
+    signingConfigs {
+        if (hasFixedKs) {
+            fixed {
+                storeFile fixedKs
+                storePassword "pkwl123456"
+                keyAlias "pkwl"
+                keyPassword "pkwl123456"
+            }
+        }
     }
 
     buildTypes {
+        debug {
+            if (hasFixedKs) signingConfig signingConfigs.fixed
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.debug
+            if (hasFixedKs) signingConfig signingConfigs.fixed
         }
     }
 

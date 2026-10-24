@@ -162,6 +162,41 @@ public class PowerKeeperApi {
         }
     }
 
+    /** ensureRow 的返回值里是否表示"这行是我们新插的" */
+    public static boolean wasInserted(String rowResult) {
+        return rowResult != null && rowResult.startsWith("insert=");
+    }
+
+    /** 清除用：删掉我们插进去的那一行 */
+    public static String deleteRow(Context ctx, String pkg) {
+        try {
+            Uri uri = userTable(ctx);
+            if (uri == null) return "uri=null";
+            int n = ctx.getContentResolver().delete(uri,
+                    "userId = ? AND pkgName = ?", new String[]{"0", pkg});
+            return "del=" + n;
+        } catch (Throwable t) {
+            return "err:" + t.getClass().getSimpleName();
+        }
+    }
+
+    /** 内部 camelCase -> 接口值 */
+    public static String toInterface(String internal) {
+        if (internal == null) return "miui_auto";
+        switch (internal) {
+            case "noRestrict":
+                return "no_restrict";
+            case "miuiAuto":
+                return "miui_auto";
+            case "restrictBg":
+                return "restrict_bg";
+            case "noBg":
+                return "no_bg";
+            default:
+                return "miui_auto";
+        }
+    }
+
     public static boolean writeBgControl(Context ctx, String pkg, String interfaceValue) {
         try {
             Class<?> mgrCls = load(ctx, "com.miui.powerkeeper.provider.PowerSaveConfigureManager");

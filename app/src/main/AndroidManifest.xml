@@ -3,6 +3,13 @@
 
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
+    <!-- 模块与 PowerKeeper 进程之间广播桥的发送方权限。
+         signature 级别：只有同签名（本模块自己）能拿到，别的应用拦不住也发不进来。 -->
+    <permission
+        android:name="com.yg.pkwhitelist.permission.BRIDGE"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.yg.pkwhitelist.permission.BRIDGE" />
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
