@@ -327,6 +327,8 @@ public class HookEntry extends XposedModule {
         if (Bridge.ACTION_QUERY.equals(action)) {
             ArrayList<String> pkgs = intent.getStringArrayListExtra(Bridge.EXTRA_PKGS);
             ArrayList<Bundle> out = new ArrayList<>();
+            // 省电模式切换时会把 sPowerSaveModeAlwaysWhiteApps 并回常驻集合，顺手再踢一次
+            purgeAlwaysWhite();
             if (pkgs != null) {
                 for (String pkg : pkgs) {
                     Bundle b = statusOf(pkg);
